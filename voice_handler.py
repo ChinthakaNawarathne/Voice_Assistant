@@ -14,7 +14,7 @@ class VoiceHandler:
         self.tts_engine = pyttsx3.init()
         self.tts_engine.setProperty('rate', 190)       # Slightly faster speech rate for snappier responses
 
-    def listen_to_user(self) -> str:
+    def listen_to_user(self) -> tuple[str, sr.AudioData | None]:
         with sr.Microphone() as source:
             print("\n🎙️ Listening... Speak now.")
             try:
@@ -23,9 +23,9 @@ class VoiceHandler:
                 print("🔄 Processing speech...")
                 text = self.recognizer.recognize_google(audio)
                 print(f"🗣️ You said: {text}")
-                return text.strip()
+                return text.strip(), audio
             except (sr.WaitTimeoutError, sr.UnknownValueError, sr.RequestError):
-                return ""
+                return "", None
 
     def speak(self, text: str):
         print(f"🤖 Assistant: {text}")

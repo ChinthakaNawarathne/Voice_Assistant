@@ -1,3 +1,4 @@
+import re
 import sys
 from typing import Annotated, Sequence
 from typing_extensions import TypedDict
@@ -6,22 +7,22 @@ from datetime import datetime
 # LangGraph & LangChain imports
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langgraph.prebuilt import ToolNode, tools_condition
 
 import config
 import search_tool
 import voice_handler
+import emotion_tracker
 
 # =====================================================================
 # 1. DEFINE AGENT STATE
 # =====================================================================
 class AgentState(TypedDict):
-    # The 'add_messages' annotation ensures new messages are appended to the list,
-    # preserving the agent's short-term conversation memory automatically.
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    user_emotion: str
 
 # =====================================================================
 # 2. DEFINE NATIVE TOOLS
@@ -50,10 +51,10 @@ tool_node = ToolNode(tools_list)
 # =====================================================================
 # 3. DEFINE NODES & COGNITIVE LOGIC
 # =====================================================================
-# Initialize Gemini using LangChain wrapper
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash", 
-    google_api_key=config.GEMINI_API_KEY,
+# Initialize Groq with lower-token model (500K TPD, smaller = cheaper on tokens)
+llm = ChatGroq(
+    model="llama-3.1-8b-instant", 
+    api_key=config.GROQ_API_KEY,
     temperature=0.1
 ).bind_tools(tools_list) # Bind tools directly to the model container
 
@@ -61,10 +62,24 @@ def call_agent(state: AgentState):
     """The brain node. Decides whether to reply or trigger an action node."""
     print("🧠 [LangGraph Node]: Thinking...")
     
+    current_emotion = state.get("user_emotion", "neutral")
     current_date = datetime.now().strftime("%B %d, %Y")
+    
+    emotion_guidance = {
+        "angry": "The user appears angry or frustrated. Be extra calm, patient, and de-escalating. Acknowledge their frustration softly.",
+        "sad": "The user sounds sad or upset. Be gentle, empathetic, and warm in your response.",
+        "fearful": "The user sounds anxious or fearful. Reassure them with a calm, confident tone.",
+        "happy": "The user sounds happy. Match their positive, upbeat energy.",
+        "surprised": "The user sounds surprised. Engage their curiosity with an enthusiastic tone.",
+        "disgusted": "The user sounds displeased. Respond diplomatically and neutrally.",
+        "neutral": "Respond in your normal helpful, friendly tone.",
+    }.get(current_emotion, "Respond in your normal helpful, friendly tone.")
+    
     system_prompt = SystemMessage(content=(
         "You are an elite, real-time voice assistant powered by LangGraph.\n"
         f"Context baseline: Today is {current_date}.\n"
+        f"User's detected emotional state: {current_emotion.upper()}.\n"
+        f"Tone guidance: {emotion_guidance}\n"
         "Analyze the user's input. If answering requires a tool, call it instantly.\n"
         "CRITICAL: Keep your final response restricted to 1-2 highly conversational sentences max."
     ))
@@ -93,8 +108,8 @@ workflow.add_conditional_edges(
     "agent_brain",
     tools_condition,
     {
-        "tools": "action_tools", # If Gemini wants a tool, route to action_tools
-        END: END                 # If Gemini is done, terminate graph execution
+        "tools": "action_tools", # If Groq wants a tool, route to action_tools
+        END: END                 # If Groq is done, terminate graph execution
     }
 )
 
@@ -113,22 +128,34 @@ def main():
     print("==================================================")
     
     voice = voice_handler.VoiceHandler()
+    emotion = emotion_tracker.EmotionTracker()
     stop_words = {"stop", "exit", "enough", "quit", "terminate"}
     
-    # Store persistent state messages list locally for conversation history continuity
-    conversation_state = {"messages": []}
+    conversation_state = {"messages": [], "user_emotion": "neutral"}
 
     voice.speak("System ready.")
 
     while True:
         try:
-            user_input = voice.listen_to_user()
+            user_input, audio_data = voice.listen_to_user()
             if not user_input:
                 continue
                 
             if user_input.lower().strip(".,!?") in stop_words:
                 voice.speak("Goodbye.")
                 break
+            
+            # Detect emotion from raw voice audio
+            user_emotion = "neutral"
+            emotion_conf = 0.0
+            if audio_data is not None:
+                user_emotion, emotion_conf = emotion.analyze(
+                    audio_data.frame_data, audio_data.sample_rate, user_input
+                )
+            print(f"🎭 User Emotion: [{user_emotion.upper()}] ({emotion_conf}% confidence)")
+            
+            # Store emotion in state for the graph
+            conversation_state["user_emotion"] = user_emotion
             
             # Append current turn to the message array payload
             conversation_state["messages"] = add_messages(
@@ -142,21 +169,29 @@ def main():
             # Update history state tracking safely with compiled output
             conversation_state["messages"] = final_output["messages"]
             
-            # Extract the raw response message object
-            last_message = final_output["messages"][-1]
+            # Walk backwards to find the last text-only assistant message
+            last_message = None
+            for msg in reversed(final_output["messages"]):
+                if isinstance(msg, AIMessage) and not msg.tool_calls:
+                    last_message = msg
+                    break
+            if last_message is None:
+                continue
             
-            # FIX: Safely parse LangChain/Gemini content layout down to a clean string
+            # Derive the text content
             if isinstance(last_message.content, list):
-                # If the content arrives as a structured list containing text dicts
                 assistant_reply = "".join(
                     [part["text"] for part in last_message.content if isinstance(part, dict) and "text" in part]
                 )
             else:
-                assistant_reply = str(last_message.content)
+                assistant_reply = str(last_message.content or "")
             
-            # Fallback if text data extraction fails
-            if not assistant_reply.strip():
-                assistant_reply = "I process that successfully, but generated empty speech text."
+            # Strip tool-call artifacts like <function=xxx>...</function>
+            assistant_reply = re.sub(r"<function=[^>]*>.*?</function>", "", assistant_reply).strip()
+            
+            # Skip non-text responses (tool calls, empty content)
+            if not assistant_reply:
+                continue
 
             voice.speak(assistant_reply)
             
