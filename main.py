@@ -16,6 +16,7 @@ import config
 import search_tool
 import voice_handler
 import emotion_tracker
+import visage_client
 
 # =====================================================================
 # 1. DEFINE AGENT STATE
@@ -23,6 +24,7 @@ import emotion_tracker
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     user_emotion: str
+    user_id: str
 
 # =====================================================================
 # 2. DEFINE NATIVE TOOLS
@@ -53,7 +55,7 @@ tool_node = ToolNode(tools_list)
 # =====================================================================
 # Initialize Groq with lower-token model (500K TPD, smaller = cheaper on tokens)
 llm = ChatGroq(
-    model="llama-3.1-8b-instant", 
+    model="llama-3.3-70b-versatile", 
     api_key=config.GROQ_API_KEY,
     temperature=0.1
 ).bind_tools(tools_list) # Bind tools directly to the model container
@@ -63,6 +65,7 @@ def call_agent(state: AgentState):
     print("🧠 [LangGraph Node]: Thinking...")
     
     current_emotion = state.get("user_emotion", "neutral")
+    user_id = state.get("user_id", "")
     current_date = datetime.now().strftime("%B %d, %Y")
     
     emotion_guidance = {
@@ -80,8 +83,10 @@ def call_agent(state: AgentState):
         f"Context baseline: Today is {current_date}.\n"
         f"User's detected emotional state: {current_emotion.upper()}.\n"
         f"Tone guidance: {emotion_guidance}\n"
-        "Analyze the user's input. If answering requires a tool, call it instantly.\n"
-        "CRITICAL: Keep your final response restricted to 1-2 highly conversational sentences max."
+        + (f"The user's identifier is: \"{user_id}\". Address them personally and naturally using this identifier if it feels appropriate.\n" if user_id else "")
+        + "Analyze the user's input. If answering requires a tool, call it via the function calling API.\n"
+        + "IMPORTANT: Never write <function=...></function> in your text. Use proper tool calls instead.\n"
+        + "CRITICAL: Keep your final response restricted to 1-2 highly conversational sentences max."
     ))
     
     # Prepend the system instructions to the ongoing message array stream
@@ -131,12 +136,20 @@ def main():
     emotion = emotion_tracker.EmotionTracker()
     stop_words = {"stop", "exit", "enough", "quit", "terminate"}
     
-    conversation_state = {"messages": [], "user_emotion": "neutral"}
+    conversation_state = {"messages": [], "user_emotion": "neutral", "user_id": ""}
+    face_cache = {"user_id": "", "last_verified": 0.0}
 
     voice.speak("System ready.")
 
     while True:
         try:
+            now = __import__("time").time()
+            if now - face_cache["last_verified"] > 3.0:
+                user_id = visage_client.verify_face()
+                face_cache["user_id"] = user_id or ""
+                face_cache["last_verified"] = now
+            conversation_state["user_id"] = face_cache["user_id"]
+
             user_input, audio_data = voice.listen_to_user()
             if not user_input:
                 continue
@@ -186,8 +199,8 @@ def main():
             else:
                 assistant_reply = str(last_message.content or "")
             
-            # Strip tool-call artifacts like <function=xxx>...</function>
-            assistant_reply = re.sub(r"<function=[^>]*>.*?</function>", "", assistant_reply).strip()
+            # Strip tool-call artifacts like <function=xxx>...</function> or <function=xxx{...}</function>
+            assistant_reply = re.sub(r"<function=[^<]*</function>", "", assistant_reply).strip()
             
             # Skip non-text responses (tool calls, empty content)
             if not assistant_reply:

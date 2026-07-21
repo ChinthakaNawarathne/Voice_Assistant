@@ -1,24 +1,24 @@
+import os
+import tempfile
 import speech_recognition as sr
-import pyttsx3
+import edge_tts
+import playsound
+
+TTS_VOICE = "en-AU-WilliamNeural"
+
 
 class VoiceHandler:
     def __init__(self):
         self.recognizer = sr.Recognizer()
         self.recognizer.dynamic_energy_threshold = True
-        
-        # SPEED OPTIMIZATION: Reduce the amount of silence time required before cutting off audio capture
-        self.recognizer.pause_threshold = 0.6          # Seconds of silence before a phrase is considered complete
-        self.recognizer.phrase_threshold = 0.2         # Minimum seconds of speaking audio to touch
-        self.recognizer.non_speaking_duration = 0.4    # Keeping silence windows lean
-        
-        self.tts_engine = pyttsx3.init()
-        self.tts_engine.setProperty('rate', 190)       # Slightly faster speech rate for snappier responses
+        self.recognizer.pause_threshold = 0.6
+        self.recognizer.phrase_threshold = 0.2
+        self.recognizer.non_speaking_duration = 0.4
 
     def listen_to_user(self) -> tuple[str, sr.AudioData | None]:
         with sr.Microphone() as source:
             print("\n🎙️ Listening... Speak now.")
             try:
-                # Optimized timeouts
                 audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=8)
                 print("🔄 Processing speech...")
                 text = self.recognizer.recognize_google(audio)
@@ -29,5 +29,10 @@ class VoiceHandler:
 
     def speak(self, text: str):
         print(f"🤖 Assistant: {text}")
-        self.tts_engine.say(text)
-        self.tts_engine.runAndWait()
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.close()
+        try:
+            edge_tts.Communicate(text, TTS_VOICE).save_sync(tmp.name)
+            playsound.playsound(tmp.name, block=True)
+        finally:
+            os.unlink(tmp.name)

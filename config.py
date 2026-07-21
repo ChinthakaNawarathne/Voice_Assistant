@@ -8,7 +8,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+VISAGE_API_URL = os.getenv("VISAGE_API_URL", "https://visage.sltdigitallab.lk/api/face_verification")
+VISAGE_API_KEY = os.getenv("VISAGE_API_KEY")
+
 if not GROQ_API_KEY:
     raise ValueError("Missing GROQ_API_KEY environment variable.")
 if not TAVILY_API_KEY:
     raise ValueError("Missing TAVILY_API_KEY environment variable.")
+if not VISAGE_API_KEY:
+    raise ValueError("Missing VISAGE_API_KEY environment variable.")
